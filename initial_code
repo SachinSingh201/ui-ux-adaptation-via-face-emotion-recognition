@@ -1,0 +1,239 @@
+# Complete modular code for DAiSEE emotion recognition project
+# Note: DAiSEE dataset requires manual download from https://people.iith.ac.in/vineethnb/resources/daisee/index.html [web:17][page:0]
+# Place videos in './daisee_videos/' after form submission (15GB tar.gz)
+# This script simulates data for demo; replace with real paths
+# Requires: pip install opencv-python tensorflow numpy pandas scikit-learn matplotlib seaborn plotly kaleido
+# For real OpenFace features, install OpenFace separately and run feature extraction (see remark)
+
+import os
+import numpy as np
+import pandas as pd
+import cv2
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix, ConfusionMatrixDisplay
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv3D, LSTM, Dense, Dropout, TimeDistributed, Conv2D, MaxPooling2D, Flatten, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.graph_objects as go
+import plotly.express as px
+import json
+from glob import glob
+
+# Step 1: Download and Preprocess DAiSEE (manual step + simulation)
+print("Step 1: Preprocessing DAiSEE dataset")
+# Real path example: videos = glob('./daisee_videos/*.mp4')
+# Labels from CSV or filename (0:very low,1:low,2:high,3:very high engagement)
+# For 5 emotions: map DAiSEE engagement to {engaging:2/3, confusion/frust:0/1 boredom:0} but simplified to 5-class simulation
+
+NUM_CLASSES = 5  # 0:boredom, 1:confusion, 2:satisfaction, 3:frustration, 4:engaging
+SEQ_LEN = 30  # 1 sec at 30fps for demo
+IMG_SIZE = (64, 64)
+NUM_SAMPLES = 1000  # Demo size; real ~9000
+
+# Simulate data (replace with real frame extraction + face detection)
+def extract_frames(video_path):
+    cap = cv2.VideoCapture(video_path)
+    frames = []
+    while len(frames) < SEQ_LEN:
+        ret, frame = cap.read()
+        if not ret: break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = cv2.resize(frame, IMG_SIZE)
+        frame = frame / 255.0  # Normalize
+        frames.append(frame)
+    cap.release()
+    return np.array(frames) if len(frames)==SEQ_LEN else np.zeros((SEQ_LEN, *IMG_SIZE, 3))
+
+# Simulate dataset (real: loop over videos, detect face with cv2 Haar/OpenFace, extract features)
+X_video = np.random.rand(NUM_SAMPLES, SEQ_LEN, *IMG_SIZE, 3).astype(np.float32)  # Video clips
+y = np.random.randint(0, NUM_CLASSES, NUM_SAMPLES)  # Labels
+
+# For baseline CNN: extract middle frame
+X_image = X_video[:, SEQ_LEN//2]  # Single frame per clip
+
+# Train/test split
+X_video_train, X_video_test, y_train, y_test = train_test_split(X_video, y, test_size=0.2, random_state=42)
+X_img_train, X_img_test, _, _ = train_test_split(X_image, y, test_size=0.2, random_state=42)
+
+print(f"Dataset ready: {NUM_SAMPLES} samples, seq_len={SEQ_LEN}")
+
+# Step 2: Build and Train Models
+
+def build_baseline_cnn():
+    model = Sequential([
+        Conv2D(32, (3,3), activation='relu', input_shape=(*IMG_SIZE, 3)),
+        MaxPooling2D(2,2),
+        Conv2D(64, (3,3), activation='relu'),
+        MaxPooling2D(2,2),
+        Flatten(),
+        Dense(128, activation='relu'),
+        Dropout(0.5),
+        Dense(NUM_CLASSES, activation='softmax')
+    ])
+    model.compile(optimizer=Adam(1e-3), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+def build_cnn_lstm():
+    model = Sequential([
+        TimeDistributed(Conv2D(32, (3,3), activation='relu'), input_shape=(SEQ_LEN, *IMG_SIZE, 3)),
+        TimeDistributed(MaxPooling2D(2,2)),
+        TimeDistributed(Conv2D(64, (3,3), activation='relu')),
+        TimeDistributed(MaxPooling2D(2,2)),
+        TimeDistributed(Flatten()),
+        LSTM(128, return_sequences=False),
+        Dense(64, activation='relu'),
+        Dropout(0.5),
+        Dense(NUM_CLASSES, activation='softmax')
+    ])
+    model.compile(optimizer=Adam(1e-3), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+def build_3d_cnn():
+    model = Sequential([
+        Conv3D(32, (3,3,3), activation='relu', input_shape=(SEQ_LEN, *IMG_SIZE, 3)),
+        MaxPooling3D((1,2,2)),
+        Conv3D(64, (3,3,3), activation='relu'),
+        MaxPooling3D((1,2,2)),
+        Flatten(),
+        Dense(128, activation='relu'),
+        Dropout(0.5),
+        Dense(NUM_CLASSES, activation='softmax')
+    ])
+    model.compile(optimizer=Adam(1e-3), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# Train with early stopping
+callbacks = [EarlyStopping(patience=5, restore_best_weights=True)]
+
+# Baseline CNN (images)
+print("Training Baseline CNN...")
+cnn_model = build_baseline_cnn()
+cnn_history = cnn_model.fit(X_img_train, y_train, epochs=20, batch_size=32, validation_split=0.2, callbacks=callbacks, verbose=0)
+
+# CNN-LSTM
+print("Training CNN-LSTM...")
+lstm_model = build_cnn_lstm()
+lstm_history = lstm_model.fit(X_video_train, y_train, epochs=20, batch_size=16, validation_split=0.2, callbacks=callbacks, verbose=0)
+
+# 3D CNN
+print("Training 3D CNN...")
+threed_model = build_3d_cnn()
+threed_history = threed_model.fit(X_video_train, y_train, epochs=20, batch_size=16, validation_split=0.2, callbacks=callbacks, verbose=0)
+
+# Step 3: Evaluate
+models = {'CNN (Image)': (cnn_model, X_img_test, cnn_history),
+          'CNN-LSTM': (lstm_model, X_video_test, lstm_history),
+          '3D CNN': (threed_model, X_video_test, threed_history)}
+
+results = {}
+for name, (model, X_test, history) in models.items():
+    if 'img' in name:
+        y_pred = np.argmax(model.predict(X_test), axis=1)
+    else:
+        y_pred = np.argmax(model.predict(X_test), axis=1)
+    acc = accuracy_score(y_test, y_pred)
+    prec, rec, f1, _ = precision_recall_fscore_support(y_test, y_pred, average='weighted')
+    results[name] = {'acc': acc, 'prec': prec, 'rec': rec, 'f1': f1}
+    print(f"{name}: Acc={acc:.3f}, F1={f1:.3f}")
+
+# Save results CSV
+df_results = pd.DataFrame(results).T
+df_results.to_csv('model_results.csv')
+
+# Confusion matrices (example for best model)
+best_model_name = max(results, key=lambda k: results[k]['acc'])
+best_model, best_X_test, _ = models[best_model_name]
+if 'img' in best_model_name:
+    y_pred_best = np.argmax(best_model.predict(best_X_test), axis=1)
+else:
+    y_pred_best = np.argmax(best_model.predict(best_X_test), axis=1)
+cm = confusion_matrix(y_test, y_pred_best)
+disp = ConfusionMatrixDisplay(cm, display_labels=['Bored','Conf','Sat','Frust','Eng'])
+fig, ax = plt.subplots(figsize=(8,6))
+disp.plot(ax=ax, cmap='Blues')
+plt.title(f'Confusion Matrix: {best_model_name}')
+plt.savefig('confusion_matrix.png', dpi=300, bbox_inches='tight')
+
+# Training accuracy plots
+fig, ax = plt.subplots(1,3, figsize=(15,5))
+for i, (name, (_, _, hist)) in enumerate(models.items()):
+    ax[i].plot(hist.history['val_accuracy'], label='Val Acc')
+    ax[i].set_title(name)
+    ax[i].legend()
+plt.tight_layout()
+plt.savefig('training_accuracy.png', dpi=300, bbox_inches='tight')
+
+# Model comparison bar chart with Plotly
+fig = px.bar(df_results[['acc', 'f1']], title='Model Performance Comparison (Demo Data)', 
+             labels={'value': 'Score', 'variable': 'Metric'})
+fig.update_layout(legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5))
+fig.write_image('model_comparison.png')
+
+# Metadata
+with open('model_comparison.png.meta.json', 'w') as f:
+    json.dump({'caption': 'Model Performance: Accuracy & F1 on Test Set', 
+               'description': 'Bar chart comparing three models on simulated DAiSEE data'}, f)
+
+with open('confusion_matrix.png.meta.json', 'w') as f:
+    json.dump({'caption': f'Confusion Matrix for Best Model ({best_model_name})', 
+               'description': 'Normalized confusion matrix across 5 emotions'}, f)
+
+with open('training_accuracy.png.meta.json', 'w') as f:
+    json.dump({'caption': 'Training Validation Accuracy Curves', 
+               'description': 'Val accuracy over epochs for all three models'}, f)
+
+print("Files generated: model_results.csv, confusion_matrix.png, training_accuracy.png, model_comparison.png")
+print("Models saved in memory for webcam demo")
+
+# Step 4: Real-time Webcam Integration (OpenCV)
+def real_time_demo(model_name='CNN-LSTM'):
+    model = models[model_name][0]
+    cap = cv2.VideoCapture(0)
+    emotion_labels = ['Boredom', 'Confusion', 'Satisfaction', 'Frustration', 'Engaging']
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret: break
+        
+        # Preprocess frame (face detection + resize)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml').detectMultiScale(gray, 1.3, 5)
+        
+        for (x,y,w,h) in faces:
+            face = frame[y:y+h, x:x+w]
+            face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+            face = cv2.resize(face, IMG_SIZE)
+            face = face / 255.0
+            face = np.expand_dims(face, axis=0)
+            
+            if model_name == 'CNN-LSTM':
+                # Fake sequence for demo
+                seq = np.repeat(face, SEQ_LEN, axis=0)
+                pred = np.argmax(model.predict(seq[np.newaxis,...]), axis=1)[0]
+            else:
+                pred = np.argmax(model.predict(face), axis=1)[0]
+            
+            label = emotion_labels[pred]
+            cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
+            cv2.putText(frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
+        
+        cv2.imshow('Real-time Emotion Recognition (Press Q to quit)', frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    
+    cap.release()
+    cv2.destroyAllWindows()
+
+# Uncomment to run webcam
+# real_time_demo('CNN-LSTM')
+
+# For UI/UX adaptation example:
+# if pred == 0: print("Show simpler content - Boredom detected")
+# elif pred == 1: print("Explain concept - Confusion")
+# etc.
+
+print("Project complete! Use real DAiSEE videos by replacing simulation. Webcam ready.")
